@@ -5,8 +5,10 @@ iOS arm64 Mach-O reverse-engineering workspace for the DSGames build shipped as
 
 ## Status
 
-Updated 2026-11-22. Gate neutralised, IPA rebuilt, local commit `8d89b9d`.
-Open: `git push` to origin needs GitHub credentials on this box.
+Updated 2026-11-24. Gate neutralised, IPA rebuilt and pushed to origin
+(`main` and `master` both at the patch commit). `tools/pack_ipa.py` now
+preserves entry modes and directory entries; the earlier repack shipped
+`DSGames` as 0644, which iOS will not launch.
 
 ## Run
 
@@ -45,4 +47,10 @@ or `codesign` on this image, so every step is Python.
   CodeDirectory page hashes, so `patch_gate.py` recomputes them in place
   (same blob size, CMS untouched). 4458/4458 pages verify afterwards.
 - `.dsi-m1` stores a sha256 that does not match the shipped binary, so it is
-  not a live integrity check of `DSGames` as-is.
+  not a live integrity check of `DSGames` as-is. It holds
+  `e8590eab…`; the original `DSGames` hashes to `d8fb516b…` and the patched
+  one to `e8b00bd7…`. Neither matches, so it is left untouched.
+- The main executable must stay 0755 inside the zip. `pack_ipa.py` writes
+  `Payload/`, `Payload/DSGames.app/` and `Frameworks/` directory entries and
+  sets `Payload/DSGames.app/DSGames` to 0755; the patched IPA then has the same
+  16 entries as the original.

@@ -25,7 +25,9 @@ Three instructions change:
 | 0x100095db8 | `b.ne` on `activationState == 0xa` | `nop` |
 
 The CodeDirectory page hashes are recomputed in place afterwards, so the
-patched binary still carries a self-consistent signature.
+patched binary still carries a self-consistent signature: 4458/4458 pages
+verify in `work/patched/Payload/DSGames.app/DSGames` (the shipped original has
+3 stale pages).
 
 ## Install
 
