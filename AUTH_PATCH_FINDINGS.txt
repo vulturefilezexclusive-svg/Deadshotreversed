@@ -1,0 +1,167 @@
+DEADSHOT / DSGames — authTokenSig dev bypass: findings and patch plan
+=======================================================================
+Binary: work/patched/Payload/DSGames.app/DSGames  (18,525,984 bytes)
+        thin arm64e Mach-O, bundle com.dsgames.app, Swift + ObjC
+Source IPA: deadshot_dev_build_unlocked.ipa (already carries the TrollGame gate patch)
+Date: 2026-11-26
+Tooling: tools/*.py (lief + capstone from pylibs/), PYTHONPATH=$PWD/pylibs
+
+
+1. WHAT EXISTS IN THE BINARY
+----------------------------
+Strings (all resolved to VAs):
+
+  0x10025b24e  "authToken"
+  0x10025b428  "Missing or invalid auth token."
+  0x10025b376  "Unauthorized"
+  0x10025b283  "UNAUTHORIZED"        (status enum, next to MAINTENANCE /
+                                       FREE / DEVICE_MISMATCH / VERIFY_UDID /
+                                       EXPIRED / BANNED)
+  0x10025abfe  "tokenRemote"
+  0x10025b207  "signature"
+  0x10025ecd0  "aov_remote_cosmetic_config_v1"
+  0x10025ed10  "https://aov.anhvu.cc/api/config"
+  0x10026a208  "authTokenSig"        (also 0x100267617, 0x100268471)
+  0x100262610  "Not authenticated"
+  0x100262690  "Authentication failed"
+
+"authTokenSig" lives in __objc_methname, i.e. it is an ObjC *selector*.
+Resolving the method list (tools/selmap.py) gives:
+
+  selector authTokenData  ->  IMP 0x10008e844   (ldr x0,[x0,#0x68]; ret)
+  selector authTokenSig   ->  IMP 0x10008e854   (ldr x0,[x0,#0x70]; ret)
+  setter authTokenSig    ->  IMP 0x10008e85c
+  _storeAuthToken:sig:    ->  IMP 0x1000934c8
+
+The owning class is UICKeyChainStore (class_ro_t at 0x100c87578,
+name -> "UICKeyChainStore"), i.e. authTokenSig is a keychain-backed
+string property, not an app class of its own.
+
+Note: there are no code references to the authTokenSig selector ref
+(0x100c8b3d0) anywhere in __text. The app reads the keychain value by
+string key, and the key string itself is referenced from Swift literals
+inside __const, not by adrp+add to __cstring. That is why a plain
+string-xref sweep returns zero hits for it.
+
+Signature machinery present:
+  _SecKeyVerifySignature        stub 0x100245150
+  _SecKeyCreateSignature       stub 0x100245110
+  CryptoKit P256 isValidSignature stub 0x100244d90
+  SecKeyVerifySignature call site: 0x1000a4908 (single)
+  P256 isValidSignature call sites: 0x1000abbec, 0x1000be7c4, 0x1000bf024,
+      0x1000c4ab8, 0x1000c4b1c, 0x1000c4b8c, 0x1000c4c74, 0x1000c4d4c,
+      0x1000c571c, 0x1000c58c0, 0x1000c599c, 0x1000c5ad0, 0x1000c5b8c,
+      0x1000c6d2c, 0x1000c73f8, 0x1000caa28
+  ECDSA/RSA public-key PEM strings: 0x10025b2e5, 0x10025b319
+
+
+2. THE LOCAL TOKEN VALIDATION FUNCTION (best candidate)
+-------------------------------------------------------
+Function 0x10008ef58 .. 0x10008f174 (540 bytes) returns a Bool in w0.
+
+  0x10008ef58  pacibsp
+  0x10008ef5c  ... frame setup ...
+  0x10008ef78  cbz  x19, 0x10008f094        ; nil token -> false
+  0x10008ef80  bl   0x10024e240             ; isEmpty?
+  0x10008ef84  cbz  w0,  0x10008f094        ; empty -> false
+  0x10008ef88  bl   0x10024d480
+  0x10008ef90  cbnz x0,  0x10008f094        ; extra guard -> false
+  ...
+  0x10008f018  bl   0x100097304             ; build/compare helper
+  0x10008f078  bl   0x100097410             ; payload/signature check
+  0x10008f088  tbz  w23, #0, 0x10008f0c0   ; <-- DECISION
+  0x10008f08c  mov  w21, #1
+  0x10008f090  b    0x10008f0f8             ; return true
+  0x10008f0c0  ... sets status 6, message "Missing or invalid auth token."
+  0x10008f0f4  mov  w21, #0                  ; return false
+
+Callers: 0x1000949c4 and 0x1000952b0 (both inside the TrollGame
+validation flow region 0x100094xxx-0x100095xxx).
+
+Helper 0x100097304 .. 0x100097410 calls 0x10008f174 first and returns nil
+when that fails (tbz w0,#0 -> x22=0), otherwise builds a string and checks
+it. Helper 0x100097410 .. 0x10009798c parses keys out of a dictionary
+(subscript at 0x100249500) and compares them.
+
+IMPORTANT CAVEAT: this function is in the same region as the licence flow
+that patch_gate.py already neutralises, and I could not prove by xref that it
+is the *aov.anhvu.cc* config-sync comparison rather than the TrollGame token
+check. The "aov_remote_cosmetic_config_v1" / "https://aov.anhvu.cc/api/config"
+pair is referenced from Swift literals in __const, and no direct adrp+add
+reference to either cstring exists in __text, so the sync function has to be
+located through the Swift literal struct, not by a cstring xref.
+
+
+3. PATCHES THAT WOULD MAKE THE GATE ALWAYS TRUSTED
+--------------------------------------------------
+Option A (narrowest, one branch; recommended first try)
+
+  0x10008f088   tbz w23, #0, 0x10008f0c0
+  -> nop                                    bytes: 1f 20 03 d5
+
+  Effect: the local validation result is ignored, flow falls through to
+  "mov w21,#1" and returns true. The nil/empty guards above still run, so a
+  completely absent token still fails. If the flicker is a *mismatch* rather
+  than a missing token, this is the correct minimal fix.
+
+Option B (whole function; mirrors the existing patch_gate.py style)
+
+  0x10008ef58   pacibsp
+  -> mov w0, #1 ; ret                       bytes: 20 00 80 52 c0 03 5f d6
+
+  Effect: the validator returns true unconditionally, including for a nil
+  token. Use if the dev build must never block on auth at all.
+
+Both are in __text and both fit inside existing instruction slots, so no
+layout changes are needed. CodeDirectory page hashes must be recomputed
+afterwards: reuse tools/patch_gate.py:resign() unchanged.
+
+Suggested implementation: add a second PATCHES entry to tools/patch_gate.py,
+e.g.
+
+  (0x10008F088, NOP, "authTokenSig validation -> always trusted")
+
+or a new tools/patch_auth.py that imports resign() from patch_gate and applies
+Option A, so the two patches stay separable and revertible.
+
+Then:
+  export PYTHONPATH=$PWD/pylibs
+  python3 tools/patch_gate.py work/Payload/DSGames.app/DSGames \
+      work/patched/Payload/DSGames.app/DSGames
+  python3 tools/patch_auth.py   work/patched/Payload/DSGames.app/DSGames \
+      work/patched/Payload/DSGames.app/DSGames
+  python3 tools/pack_ipa.py work/patched/Payload/DSGames.app \
+      deadshot_dev_build_unlocked.ipa
+
+
+4. OPEN ITEMS (what still needs confirming)
+-------------------------------------------
+a) Confirm which function actually performs the aov.anhvu.cc config sync.
+   Method: find the __const literal struct holding 0x10025ed10
+   ("https://aov.anhvu.cc/api/config"), then find the adrp+add that
+   materialises *that struct address* (the cstring itself is only reached
+   through the struct). Current sweeps hit 0 because they targeted the
+   cstring VA directly.
+b) Once found, check whether its comparison is a string compare
+   (memcmp/==) against the keychain authTokenSig or a signature check
+   (SecKeyVerifySignature / P256). Patch the branch, not the crypto, unless
+   the crypto is what is failing.
+c) The .dsi-m1 file holds a sha256 that matches neither the original nor
+   the patched binary, so it is not a live integrity check; leave it alone
+   (already documented in AGENTS.md).
+d) Nothing here has been verified on a device. Page hashes verify in the
+   file, but only a launch on-device proves the gate is gone.
+
+
+5. QUICK REFERENCE — offsets already known
+------------------------------------------
+va_to_off() maps VA->file offset via segments; __text starts at
+0x100004000 (file 0x4000), size 0x23ccd0.
+  TGResult.valid            0x10008e704   (already patched -> mov w0,#1;ret)
+  tgOfflineValidated        0x10008e874   (already patched)
+  activationState compare   0x100095db8   (already patched -> nop)
+  authTokenData getter      0x10008e844
+  authTokenSig getter       0x10008e854
+  _storeAuthToken:sig:      0x1000934c8
+  local token validator     0x10008ef58
+  decision branch           0x10008f088

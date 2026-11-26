@@ -5,16 +5,23 @@ iOS arm64 Mach-O reverse-engineering workspace for the DSGames build shipped as
 
 ## Status
 
-Updated 2026-11-24. Gate neutralised, IPA rebuilt and pushed to origin
-(`main` and `master` both at the patch commit). `tools/pack_ipa.py` now
-preserves entry modes and directory entries; the earlier repack shipped
-`DSGames` as 0644, which iOS will not launch.
+Updated 2026-11-26. Gate neutralised, plus the dev auth bypass below; IPA
+rebuilt and pushed to origin (`main` and `master` both at the patch commit).
+`tools/pack_ipa.py` preserves entry modes and directory entries; the earlier
+repack shipped `DSGames` as 0644, which iOS will not launch.
+
+`tools/patch_auth.py` nops the decision branch of the local `authTokenSig`
+validator (0x10008f088), so a token whose local check disagrees is accepted
+while a missing/empty token still fails. Not yet proven to be the
+`aov.anhvu.cc` config-sync comparison and not verified on a device: see
+`AUTH_PATCH_FINDINGS.txt`.
 
 ## Run
 
 ```
 export PYTHONPATH=$PWD/pylibs
 python3 tools/patch_gate.py work/Payload/DSGames.app/DSGames work/patched/Payload/DSGames.app/DSGames
+python3 tools/patch_auth.py work/patched/Payload/DSGames.app/DSGames work/patched/Payload/DSGames.app/DSGames
 python3 tools/pack_ipa.py work/patched/Payload/DSGames.app deadshot_dev_build_unlocked.ipa
 ```
 
@@ -29,7 +36,8 @@ or `codesign` on this image, so every step is Python.
 - `tools/xrefs_fn.py`, `ref_scan.py`, `callers.py` walk per-function (from
   `LC_FUNCTION_STARTS`) so a linear sweep does not desync.
 - `tools/disasm.py`, `dumpfn.py` annotate adrp+add string targets.
-- `tools/patch_gate.py` the patch itself, `tools/pack_ipa.py` the repack.
+- `tools/patch_gate.py` and `tools/patch_auth.py` the patches, `tools/pack_ipa.py`
+  the repack.
 
 ## Decisions
 
